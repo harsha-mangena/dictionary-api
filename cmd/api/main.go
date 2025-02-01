@@ -8,6 +8,7 @@ import (
     "os/signal"
     "syscall"
     "time"
+    "crypto/tls"
 
     "dictionary-api/internal/config"
     "dictionary-api/internal/handlers"
@@ -97,6 +98,10 @@ func connectMongoDB(cfg *config.Config) (*mongo.Client, error) {
         SetConnectTimeout(30*time.Second).
         SetServerSelectionTimeout(30*time.Second).
         SetMaxPoolSize(50).
+        SetTLSConfig(&tls.Config{
+            InsecureSkipVerify: false,
+            MinVersion:         tls.VersionTLS12,
+        }).
         SetRetryWrites(true).
         SetRetryReads(true).
         SetDirect(false)
@@ -107,7 +112,10 @@ func connectMongoDB(cfg *config.Config) (*mongo.Client, error) {
         return nil, err
     }
 
-    err = client.Ping(ctx, nil)
+    pingCtx, pingCancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer pingCancel()
+    
+    err = client.Ping(pingCtx, nil)
     if err != nil {
         log.Printf("Failed to ping MongoDB: %v", err)
         return nil, err
