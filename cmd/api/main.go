@@ -43,6 +43,7 @@ func main() {
     apiRouter.HandleFunc("/words/random", handler.GetRandomWord).Methods("GET")
     apiRouter.HandleFunc("/words/word-of-day", handler.GetWordOfDay).Methods("GET")
     apiRouter.HandleFunc("/words/search", handler.SearchWords).Methods("GET")
+    apiRouter.HandleFunc("/debug", handler.DebugWord).Methods("GET")
 
     apiRouter.HandleFunc("/words/{id}", handler.GetWord).Methods("GET")
 
@@ -68,6 +69,7 @@ func main() {
     log.Printf("- GET /api/v1/words/random")
     log.Printf("- GET /api/v1/words/word-of-day")
     log.Printf("- GET /api/v1/words/{id}")
+    
 
 
     c := make(chan os.Signal, 1)

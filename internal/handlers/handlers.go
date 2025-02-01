@@ -4,9 +4,13 @@ import (
     "context"
     "encoding/json"
     "log"
+    "math"
     "math/rand"
     "net/http"
+    "strconv"
+    "strings"
     "time"
+    "dictionary-api/internal/models"
 
     "github.com/go-redis/redis/v8"
     "github.com/gorilla/mux"
@@ -28,147 +32,192 @@ func NewHandler(db *mongo.Collection, redisClient *redis.Client) *Handler {
     }
 }
 
+func sanitizeWord(word *models.Word) {
+    for i := range word.Definitions {
+        word.Definitions[i].PartOfSpeech = strings.Trim(word.Definitions[i].PartOfSpeech, "\"")
+        word.Definitions[i].Definition = strings.Trim(word.Definitions[i].Definition, "\"")
+    }
+}
+
 func (h *Handler) SearchWords(w http.ResponseWriter, r *http.Request) {
-    log.Printf("Handling SearchWords request")
-    query := r.URL.Query().Get("q")
-    if query == "" {
+    query := r.URL.Query()
+    searchTerm := query.Get("q")
+    if searchTerm == "" {
         respondWithError(w, http.StatusBadRequest, "Search query is required")
         return
     }
 
+    page, _ := strconv.Atoi(query.Get("page"))
+    if page < 1 {
+        page = 1
+    }
+    limit, _ := strconv.Atoi(query.Get("limit"))
+    if limit < 1 {
+        limit = 10
+    }
+
     filter := bson.M{
-        "word": bson.M{
-            "$regex":   query,
-            "$options": "i",
+        "$or": []bson.M{
+            {"word": bson.M{"$regex": searchTerm, "$options": "i"}},
+            {"definitions.definition": bson.M{"$regex": searchTerm, "$options": "i"}},
         },
     }
 
-    cursor, err := h.db.Find(context.Background(), filter, options.Find().SetLimit(10))
+    findOptions := options.Find().
+        SetLimit(int64(limit)).
+        SetSkip(int64((page - 1) * limit)).
+        SetSort(bson.D{{"word", 1}})
+
+    cursor, err := h.db.Find(context.Background(), filter, findOptions)
     if err != nil {
-        log.Printf("Error searching words: %v", err)
+        log.Printf("Search error: %v", err)
         respondWithError(w, http.StatusInternalServerError, "Error searching words")
         return
     }
     defer cursor.Close(context.Background())
 
-    var results []interface{}
-    if err = cursor.All(context.Background(), &results); err != nil {
-        log.Printf("Error processing results: %v", err)
+    var words []models.Word
+    if err = cursor.All(context.Background(), &words); err != nil {
+        log.Printf("Cursor error: %v", err)
         respondWithError(w, http.StatusInternalServerError, "Error processing results")
         return
     }
 
-    log.Printf("Found %d results for query: %s", len(results), query)
-    respondWithJSON(w, http.StatusOK, results)
+    for i := range words {
+        sanitizeWord(&words[i])
+    }
+
+    totalCount, err := h.db.CountDocuments(context.Background(), filter)
+    if err != nil {
+        log.Printf("Count error: %v", err)
+        respondWithError(w, http.StatusInternalServerError, "Error counting results")
+        return
+    }
+
+    meta := &models.MetaData{
+        TotalCount:  totalCount,
+        CurrentPage: page,
+        PageSize:    limit,
+        TotalPages:  int(math.Ceil(float64(totalCount) / float64(limit))),
+    }
+
+    respondWithAPIResponse(w, http.StatusOK, true, words, "", meta)
 }
 
 func (h *Handler) GetRandomWord(w http.ResponseWriter, r *http.Request) {
-    log.Printf("Handling GetRandomWord request")
-    
     count, err := h.db.CountDocuments(context.Background(), bson.M{})
     if err != nil {
-        log.Printf("Error counting documents: %v", err)
+        log.Printf("Count error: %v", err)
         respondWithError(w, http.StatusInternalServerError, "Database error")
         return
     }
 
     randomSkip := rand.Int63n(count)
-    var word interface{}
+    var word models.Word
     err = h.db.FindOne(context.Background(), 
         bson.M{},
         options.FindOne().SetSkip(randomSkip),
     ).Decode(&word)
 
     if err != nil {
-        log.Printf("Error retrieving random word: %v", err)
+        log.Printf("Random word error: %v", err)
         respondWithError(w, http.StatusInternalServerError, "Error retrieving random word")
         return
     }
 
-    log.Printf("Successfully retrieved random word")
-    respondWithJSON(w, http.StatusOK, word)
+    sanitizeWord(&word)
+    respondWithAPIResponse(w, http.StatusOK, true, word, "", nil)
 }
 
 func (h *Handler) GetWordOfDay(w http.ResponseWriter, r *http.Request) {
-    log.Printf("Handling GetWordOfDay request")
     key := "word_of_day"
     
+    var word models.Word
     cachedWord, err := h.redis.Get(context.Background(), key).Result()
     if err == nil {
-        log.Printf("Returning cached word of the day")
-        w.Write([]byte(cachedWord))
-        return
+        if err := json.Unmarshal([]byte(cachedWord), &word); err == nil {
+            sanitizeWord(&word)
+            respondWithAPIResponse(w, http.StatusOK, true, word, "", nil)
+            return
+        }
     }
 
     count, err := h.db.CountDocuments(context.Background(), bson.M{})
     if err != nil {
-        log.Printf("Error counting documents: %v", err)
+        log.Printf("Count error: %v", err)
         respondWithError(w, http.StatusInternalServerError, "Database error")
         return
     }
 
+    seed := time.Now().Format("2006-01-02")
+    rand.Seed(int64(hash(seed)))
     randomSkip := rand.Int63n(count)
-    var word interface{}
+    
     err = h.db.FindOne(context.Background(), 
         bson.M{},
         options.FindOne().SetSkip(randomSkip),
     ).Decode(&word)
 
     if err != nil {
-        log.Printf("Error retrieving word of day: %v", err)
+        log.Printf("Word of day error: %v", err)
         respondWithError(w, http.StatusInternalServerError, "Error retrieving word of the day")
         return
     }
 
+    sanitizeWord(&word)
     wordJSON, _ := json.Marshal(word)
     h.redis.Set(context.Background(), key, wordJSON, 24*time.Hour)
 
-    log.Printf("Successfully retrieved and cached new word of the day")
-    respondWithJSON(w, http.StatusOK, word)
+    respondWithAPIResponse(w, http.StatusOK, true, word, "", nil)
 }
 
 func (h *Handler) GetWord(w http.ResponseWriter, r *http.Request) {
     vars := mux.Vars(r)
     wordID := vars["id"]
-    log.Printf("Handling GetWord request for ID: %s", wordID)
 
     objID, err := primitive.ObjectIDFromHex(wordID)
     if err != nil {
-        log.Printf("Invalid word ID format: %s", wordID)
         respondWithError(w, http.StatusBadRequest, "Invalid word ID")
         return
     }
 
-    var word interface{}
+    var word models.Word
     err = h.db.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&word)
     if err != nil {
         if err == mongo.ErrNoDocuments {
-            log.Printf("Word not found for ID: %s", wordID)
             respondWithError(w, http.StatusNotFound, "Word not found")
             return
         }
-        log.Printf("Database error: %v", err)
+        log.Printf("Get word error: %v", err)
         respondWithError(w, http.StatusInternalServerError, "Database error")
         return
     }
 
-    log.Printf("Successfully retrieved word with ID: %s", wordID)
-    respondWithJSON(w, http.StatusOK, word)
+    sanitizeWord(&word)
+    respondWithAPIResponse(w, http.StatusOK, true, word, "", nil)
 }
 
 func respondWithError(w http.ResponseWriter, code int, message string) {
-    respondWithJSON(w, code, map[string]string{"error": message})
+    respondWithAPIResponse(w, code, false, nil, message, nil)
 }
 
-func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-    response, err := json.Marshal(payload)
-    if err != nil {
-        log.Printf("Error marshaling JSON: %v", err)
-        w.WriteHeader(http.StatusInternalServerError)
-        return
+func respondWithAPIResponse(w http.ResponseWriter, code int, success bool, data interface{}, errorMsg string, meta *models.MetaData) {
+    response := models.APIResponse{
+        Success: success,
+        Data:    data,
+        Error:   errorMsg,
+        Meta:    meta,
     }
 
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(code)
-    w.Write(response)
+    json.NewEncoder(w).Encode(response)
+}
+
+func hash(s string) uint32 {
+    var h uint32
+    for i := 0; i < len(s); i++ {
+        h = h*31 + uint32(s[i])
+    }
+    return h
 }
