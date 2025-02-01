@@ -87,22 +87,29 @@ func main() {
 }
 
 func connectMongoDB(cfg *config.Config) (*mongo.Client, error) {
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    log.Printf("Attempting to connect to MongoDB at URI: %s", cfg.MongoURI)
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
 
     clientOptions := options.Client().
         ApplyURI(cfg.MongoURI).
-        SetConnectTimeout(5 * time.Second).
-        SetServerSelectionTimeout(5 * time.Second).
-        SetMaxPoolSize(100)
+        SetConnectTimeout(30*time.Second).
+        SetServerSelectionTimeout(30*time.Second).
+        SetMaxPoolSize(50).
+        SetRetryWrites(true).
+        SetRetryReads(true).
+        SetDirect(false)
 
     client, err := mongo.Connect(ctx, clientOptions)
     if err != nil {
+        log.Printf("Failed to create MongoDB client: %v", err)
         return nil, err
     }
 
     err = client.Ping(ctx, nil)
     if err != nil {
+        log.Printf("Failed to ping MongoDB: %v", err)
         return nil, err
     }
 

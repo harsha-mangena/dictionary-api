@@ -1,3 +1,5 @@
+// internal/config/config.go
+
 package config
 
 import (
@@ -21,46 +23,31 @@ type Config struct {
 }
 
 func LoadConfig() *Config {
-    err := godotenv.Load()
-    if err != nil {
-        log.Println("Warning: .env file not found")
-    }
+    _ = godotenv.Load()
 
-    return &Config{
+    config := &Config{
         Port:          getEnv("PORT", "8080"),
-        MongoURI:      getEnv("MONGODB_URI", "mongodb://localhost:27017"),
+        MongoURI:      getEnv("MONGODB_URI", ""),
         MongoDatabase: getEnv("MONGODB_DATABASE", "dictionary"),
-        RedisAddr:     getEnv("REDIS_ADDR", "localhost:6379"),
+        RedisAddr:     getEnv("REDIS_ADDR", ""),
         RedisUsername: getEnv("REDIS_USERNAME", "default"),
         RedisPassword: getEnv("REDIS_PASSWORD", ""),
         RedisDB:       getEnvAsInt("REDIS_DB", 0),
     }
-}
 
-func getEnv(key, defaultValue string) string {
-    value := os.Getenv(key)
-    if value == "" {
-        return defaultValue
+    if config.MongoURI == "" {
+        log.Fatal("MONGODB_URI is required")
     }
-    return value
-}
+    if config.RedisAddr == "" {
+        log.Fatal("REDIS_ADDR is required")
+    }
 
-func getEnvAsInt(key string, defaultValue int) int {
-    value := os.Getenv(key)
-    if value == "" {
-        return defaultValue
-    }
-    
-    intValue, err := strconv.Atoi(value)
-    if err != nil {
-        return defaultValue
-    }
-    return intValue
+    return config
 }
 
 func NewRedisClient() *redis.Client {
     client := redis.NewClient(&redis.Options{
-        Addr:     getEnv("REDIS_ADDR", "localhost:6379"),
+        Addr:     getEnv("REDIS_ADDR", ""),
         Username: getEnv("REDIS_USERNAME", "default"),
         Password: getEnv("REDIS_PASSWORD", ""),
         DB:       getEnvAsInt("REDIS_DB", 0),
@@ -74,4 +61,20 @@ func NewRedisClient() *redis.Client {
 
     log.Println("Successfully connected to Redis")
     return client
+}
+
+func getEnv(key, defaultValue string) string {
+    if value, exists := os.LookupEnv(key); exists {
+        return value
+    }
+    return defaultValue
+}
+
+func getEnvAsInt(key string, defaultValue int) int {
+    if value, exists := os.LookupEnv(key); exists {
+        if intVal, err := strconv.Atoi(value); err == nil {
+            return intVal
+        }
+    }
+    return defaultValue
 }
